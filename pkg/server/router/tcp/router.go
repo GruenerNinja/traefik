@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-acme/lego/v4/challenge/tlsalpn01"
@@ -41,8 +43,15 @@ type Router struct {
 	// Forwarder handlers.
 	// httpForwarder handles all HTTP requests.
 	httpForwarder tcp.Handler
+	// httpForwarderFirst lets HTTP route matching run before TCP fallback on non-TLS connections.
+	httpForwarderFirst bool
 	// httpsForwarder handles (indirectly through muxerHTTPS, or directly) all HTTPS requests.
 	httpsForwarder tcp.Handler
+	// tcpFallbackForwarder handles unmatched non-TLS TCP requests before they are forwarded to HTTP.
+	tcpFallbackForwarder tcp.Handler
+	// tlsFallbackForwarder handles unmatched TLS requests before TLS termination.
+	tlsFallbackForwarder tcp.Handler
+	tlsFallbackCache     *TLSFallbackCache
 
 	// Neither is used directly, but they are held here, and recreated on config reload,
 	// so that they can be passed to the Switcher at the end of the config reload phase.
@@ -57,7 +66,7 @@ type Router struct {
 }
 
 // NewRouter returns a new TCP router.
-func NewRouter(providersPrecedence []string) (*Router, error) {
+func NewRouter(providersPrecedence []string, fallbackCaches ...*TLSFallbackCache) (*Router, error) {
 	muxTCP, err := tcpmuxer.NewMuxer(providersPrecedence)
 	if err != nil {
 		return nil, err
@@ -73,11 +82,38 @@ func NewRouter(providersPrecedence []string) (*Router, error) {
 		return nil, err
 	}
 
+	tlsFallbackCache := NewTLSFallbackCache()
+	if len(fallbackCaches) > 0 && fallbackCaches[0] != nil {
+		tlsFallbackCache = fallbackCaches[0]
+	}
+
 	return &Router{
-		muxerTCP:    *muxTCP,
-		muxerTCPTLS: *muxTCPTLS,
-		muxerHTTPS:  *muxHTTPS,
+		muxerTCP:         *muxTCP,
+		muxerTCPTLS:      *muxTCPTLS,
+		muxerHTTPS:       *muxHTTPS,
+		tlsFallbackCache: tlsFallbackCache,
 	}, nil
+}
+
+// TLSFallbackCache stores TLS fallback routing decisions across router rebuilds.
+type TLSFallbackCache struct {
+	mu      sync.RWMutex
+	entries map[string]struct{}
+}
+
+// NewTLSFallbackCache creates a TLS fallback decision cache.
+func NewTLSFallbackCache() *TLSFallbackCache {
+	return &TLSFallbackCache{
+		entries: make(map[string]struct{}),
+	}
+}
+
+// Reset clears the cached TLS fallback routing decisions.
+func (c *TLSFallbackCache) Reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.entries = make(map[string]struct{})
 }
 
 // HTTP3TLSConfigMatcherFunc returns a matcher func for HTTP/3 which returns a tls.Config with its corresponding
@@ -183,6 +219,10 @@ func (r *Router) ServeTCP(conn tcp.WriteCloser) {
 		switch {
 		case handler != nil:
 			handler.ServeTCP(pConn)
+		case r.httpForwarderFirst && r.httpForwarder != nil:
+			r.httpForwarder.ServeTCP(pConn)
+		case r.tcpFallbackForwarder != nil:
+			r.tcpFallbackForwarder.ServeTCP(pConn)
 		case r.httpForwarder != nil:
 			r.httpForwarder.ServeTCP(pConn)
 		default:
@@ -194,6 +234,12 @@ func (r *Router) ServeTCP(conn tcp.WriteCloser) {
 	// Handling ACME-TLS/1 challenges.
 	if !r.acmeTLSPassthrough && slices.Contains(hello.protos, tlsalpn01.ACMETLS1Protocol) {
 		r.acmeTLSALPNHandler().ServeTCP(pConn)
+		return
+	}
+
+	tlsFallbackKey := r.tlsFallbackKey(hello, pConn.RemoteAddr())
+	if r.tlsFallbackForwarder != nil && r.isTLSFallbackCached(tlsFallbackKey) {
+		r.tlsFallbackForwarder.ServeTCP(pConn)
 		return
 	}
 
@@ -215,6 +261,13 @@ func (r *Router) ServeTCP(conn tcp.WriteCloser) {
 	handlerTCPTLS, catchAllTCPTLS := r.muxerTCPTLS.Match(connData)
 	if handlerTCPTLS != nil && !catchAllTCPTLS {
 		handlerTCPTLS.ServeTCP(pConn)
+		return
+	}
+
+	// Fallback on a raw TLS forwarder before handing the connection to HTTPS catch-all routes or the HTTPS 404 handler.
+	if r.tlsFallbackForwarder != nil {
+		r.cacheTLSFallback(tlsFallbackKey)
+		r.tlsFallbackForwarder.ServeTCP(pConn)
 		return
 	}
 
@@ -271,6 +324,67 @@ func (r *Router) GetHTTPSHandler() http.Handler {
 // SetHTTPForwarder sets the tcp handler that will forward the connections to an http handler.
 func (r *Router) SetHTTPForwarder(handler tcp.Handler) {
 	r.httpForwarder = handler
+}
+
+// SetHTTPForwarderFirst lets HTTP route matching run before TCP fallback on non-TLS connections.
+func (r *Router) SetHTTPForwarderFirst(forwardFirst bool) {
+	r.httpForwarderFirst = forwardFirst
+}
+
+// SetTCPFallbackForwarder sets the tcp handler that will forward unmatched non-TLS TCP connections.
+func (r *Router) SetTCPFallbackForwarder(handler tcp.Handler) error {
+	if r.tcpFallbackForwarder != nil {
+		return errors.New("TCP fallback handler already configured")
+	}
+
+	r.tcpFallbackForwarder = handler
+	return nil
+}
+
+// SetTLSFallbackForwarder sets the tcp handler that will forward unmatched TLS connections before TLS termination.
+func (r *Router) SetTLSFallbackForwarder(handler tcp.Handler) error {
+	if r.tlsFallbackForwarder != nil {
+		return errors.New("TLS fallback handler already configured")
+	}
+
+	r.tlsFallbackForwarder = handler
+	return nil
+}
+
+func (r *Router) tlsFallbackKey(hello *clientHello, remoteAddr net.Addr) string {
+	host, _, err := net.SplitHostPort(remoteAddr.String())
+	if err != nil {
+		host = remoteAddr.String()
+	}
+
+	return hello.serverName + "\x00" + host + "\x00" + strings.Join(hello.protos, "\x00")
+}
+
+func (r *Router) isTLSFallbackCached(key string) bool {
+	if r.tlsFallbackCache == nil {
+		return false
+	}
+
+	r.tlsFallbackCache.mu.RLock()
+	defer r.tlsFallbackCache.mu.RUnlock()
+
+	_, ok := r.tlsFallbackCache.entries[key]
+	return ok
+}
+
+func (r *Router) cacheTLSFallback(key string) {
+	if r.tlsFallbackCache == nil {
+		return
+	}
+
+	r.tlsFallbackCache.mu.Lock()
+	defer r.tlsFallbackCache.mu.Unlock()
+
+	if r.tlsFallbackCache.entries == nil {
+		r.tlsFallbackCache.entries = make(map[string]struct{})
+	}
+
+	r.tlsFallbackCache.entries[key] = struct{}{}
 }
 
 // SetHTTPSForwarder sets the tcp handler that will forward the TLS connections to an HTTP handler.

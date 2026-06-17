@@ -35,6 +35,7 @@ type Manager struct {
 	tlsManager          *traefiktls.Manager
 	conf                *runtime.Configuration
 	providersPrecedence []string
+	tlsFallbackCaches   map[string]*TLSFallbackCache
 }
 
 // NewManager Creates a new Manager.
@@ -57,6 +58,11 @@ func NewManager(conf *runtime.Configuration,
 	}
 }
 
+// SetTLSFallbackCaches sets the entrypoint-scoped TLS fallback caches.
+func (m *Manager) SetTLSFallbackCaches(caches map[string]*TLSFallbackCache) {
+	m.tlsFallbackCaches = caches
+}
+
 // BuildHandlers builds the handlers for the given entrypoints.
 func (m *Manager) BuildHandlers(rootCtx context.Context, entryPoints []string) map[string]*Router {
 	entryPointsRouters := m.getTCPRouters(rootCtx, entryPoints)
@@ -69,7 +75,7 @@ func (m *Manager) BuildHandlers(rootCtx context.Context, entryPoints []string) m
 		logger := log.Ctx(rootCtx).With().Str(logs.EntryPointName, entryPointName).Logger()
 		ctx := logger.WithContext(rootCtx)
 
-		handler, err := m.buildEntryPointHandler(ctx, routers, entryPointsRoutersHTTP[entryPointName], m.httpHandlers[entryPointName], m.httpsHandlers[entryPointName])
+		handler, err := m.buildEntryPointHandler(ctx, entryPointName, routers, entryPointsRoutersHTTP[entryPointName], m.httpHandlers[entryPointName], m.httpsHandlers[entryPointName])
 		if err != nil {
 			logger.Error().Err(err).Send()
 			continue
@@ -95,14 +101,15 @@ func (m *Manager) getHTTPRouters(ctx context.Context, entryPoints []string, tls 
 	return make(map[string]map[string]*runtime.RouterInfo)
 }
 
-func (m *Manager) buildEntryPointHandler(ctx context.Context, configs map[string]*runtime.TCPRouterInfo, configsHTTP map[string]*runtime.RouterInfo, handlerHTTP, handlerHTTPS http.Handler) (*Router, error) {
+func (m *Manager) buildEntryPointHandler(ctx context.Context, entryPointName string, configs map[string]*runtime.TCPRouterInfo, configsHTTP map[string]*runtime.RouterInfo, handlerHTTP, handlerHTTPS http.Handler) (*Router, error) {
 	// Build a new Router.
-	router, err := NewRouter(m.providersPrecedence)
+	router, err := NewRouter(m.providersPrecedence, m.tlsFallbackCaches[entryPointName])
 	if err != nil {
 		return nil, err
 	}
 
 	router.SetHTTPHandler(handlerHTTP)
+	router.SetHTTPForwarderFirst(hasHTTPFallback(configsHTTP))
 
 	// Even though the error is seemingly ignored (aside from logging it),
 	// we actually rely later on the fact that a tls config is nil (which happens when an error is returned) to take special steps
@@ -207,21 +214,36 @@ func (m *Manager) buildEntryPointHandler(ctx context.Context, configs map[string
 	return router, nil
 }
 
+func hasHTTPFallback(configs map[string]*runtime.RouterInfo) bool {
+	for _, config := range configs {
+		if config != nil && config.Fallback {
+			return true
+		}
+	}
+
+	return false
+}
+
 // addTCPHandlers creates the TCP handlers defined in configs, and adds them to router.
 func (m *Manager) addTCPHandlers(ctx context.Context, configs map[string]*runtime.TCPRouterInfo, router *Router) {
 	for routerName, routerConfig := range configs {
 		logger := log.Ctx(ctx).With().Str(logs.RouterName, routerName).Logger()
 		ctxRouter := logger.WithContext(provider.AddInContext(ctx, routerName))
 
-		if routerConfig.Priority == 0 {
-			routerConfig.Priority = tcpmuxer.GetRulePriority(routerConfig.Rule)
-		}
-
 		if routerConfig.Service == "" {
 			err := errors.New("the service is missing on the router")
 			routerConfig.AddError(err, true)
 			logger.Error().Err(err).Send()
 			continue
+		}
+
+		if routerConfig.Fallback {
+			m.addFallbackTCPHandler(ctxRouter, routerConfig, router)
+			continue
+		}
+
+		if routerConfig.Priority == 0 {
+			routerConfig.Priority = tcpmuxer.GetRulePriority(routerConfig.Rule)
 		}
 
 		if routerConfig.Rule == "" {
@@ -352,6 +374,39 @@ func (m *Manager) addTCPHandlers(ctx context.Context, configs map[string]*runtim
 			logger.Error().Err(err).Send()
 			continue
 		}
+	}
+}
+
+func (m *Manager) addFallbackTCPHandler(ctx context.Context, routerConfig *runtime.TCPRouterInfo, router *Router) {
+	logger := log.Ctx(ctx)
+
+	if routerConfig.TLS != nil && !routerConfig.TLS.Passthrough {
+		err := errors.New("fallback TLS router must enable TLS passthrough")
+		routerConfig.AddError(err, true)
+		logger.Error().Err(err).Send()
+		return
+	}
+
+	handler, err := m.buildTCPHandler(ctx, routerConfig)
+	if err != nil {
+		routerConfig.AddError(err, true)
+		logger.Error().Err(err).Send()
+		return
+	}
+
+	if routerConfig.TLS == nil {
+		logger.Debug().Msg("Adding TCP fallback route")
+		if err := router.SetTCPFallbackForwarder(handler); err != nil {
+			routerConfig.AddError(err, true)
+			logger.Error().Err(err).Send()
+		}
+		return
+	}
+
+	logger.Debug().Msg("Adding TLS fallback route")
+	if err := router.SetTLSFallbackForwarder(handler); err != nil {
+		routerConfig.AddError(err, true)
+		logger.Error().Err(err).Send()
 	}
 }
 

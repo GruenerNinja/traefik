@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/rs/zerolog/log"
 	"github.com/traefik/traefik/v3/pkg/config/runtime"
@@ -35,7 +37,9 @@ type RouterFactory struct {
 	observabilityMgr *middleware.ObservabilityMgr
 	tlsManager       *tls.Manager
 
-	dialerManager *tcp.DialerManager
+	dialerManager              *tcp.DialerManager
+	tlsFallbackCaches          map[string]*tcprouter.TLSFallbackCache
+	tlsFallbackRouteSignatures map[string]string
 
 	cancelPrevState func()
 
@@ -84,16 +88,18 @@ func NewRouterFactory(staticConfiguration static.Configuration, managerFactory *
 	}
 
 	return &RouterFactory{
-		entryPointsTCP:      entryPointsTCP,
-		entryPointsUDP:      entryPointsUDP,
-		managerFactory:      managerFactory,
-		observabilityMgr:    observabilityMgr,
-		tlsManager:          tlsManager,
-		pluginBuilder:       pluginBuilder,
-		dialerManager:       dialerManager,
-		allowACMEByPass:     allowACMEByPass,
-		parser:              parser,
-		providersPrecedence: providersPrecedence,
+		entryPointsTCP:             entryPointsTCP,
+		entryPointsUDP:             entryPointsUDP,
+		managerFactory:             managerFactory,
+		observabilityMgr:           observabilityMgr,
+		tlsManager:                 tlsManager,
+		pluginBuilder:              pluginBuilder,
+		dialerManager:              dialerManager,
+		tlsFallbackCaches:          make(map[string]*tcprouter.TLSFallbackCache),
+		tlsFallbackRouteSignatures: make(map[string]string),
+		allowACMEByPass:            allowACMEByPass,
+		parser:                     parser,
+		providersPrecedence:        providersPrecedence,
 	}, nil
 }
 
@@ -128,6 +134,7 @@ func (f *RouterFactory) CreateRouters(rtConf *runtime.Configuration) (map[string
 	middlewaresTCPBuilder := tcpmiddleware.NewBuilder(rtConf.TCPMiddlewares)
 
 	rtTCPManager := tcprouter.NewManager(rtConf, svcTCPManager, middlewaresTCPBuilder, handlersNonTLS, handlersTLS, f.tlsManager, f.providersPrecedence)
+	rtTCPManager.SetTLSFallbackCaches(f.getTLSFallbackCaches(rtConf))
 	routersTCP := rtTCPManager.BuildHandlers(ctx, f.entryPointsTCP)
 
 	for ep, r := range routersTCP {
@@ -146,4 +153,49 @@ func (f *RouterFactory) CreateRouters(rtConf *runtime.Configuration) (map[string
 	rtConf.PopulateUsedBy()
 
 	return routersTCP, routersUDP
+}
+
+func (f *RouterFactory) getTLSFallbackCaches(rtConf *runtime.Configuration) map[string]*tcprouter.TLSFallbackCache {
+	caches := make(map[string]*tcprouter.TLSFallbackCache, len(f.entryPointsTCP))
+	for _, entryPointName := range f.entryPointsTCP {
+		cache := f.tlsFallbackCaches[entryPointName]
+		if cache == nil {
+			cache = tcprouter.NewTLSFallbackCache()
+			f.tlsFallbackCaches[entryPointName] = cache
+		}
+
+		signature := tlsFallbackRouteSignature(rtConf, entryPointName)
+		if previousSignature, ok := f.tlsFallbackRouteSignatures[entryPointName]; ok && previousSignature != signature {
+			cache.Reset()
+		}
+		f.tlsFallbackRouteSignatures[entryPointName] = signature
+
+		caches[entryPointName] = cache
+	}
+
+	return caches
+}
+
+func tlsFallbackRouteSignature(rtConf *runtime.Configuration, entryPointName string) string {
+	var parts []string
+
+	for routerName, routerConfig := range rtConf.TCPRouters {
+		if routerConfig == nil || routerConfig.Fallback || routerConfig.TLS == nil || !slices.Contains(routerConfig.EntryPoints, entryPointName) {
+			continue
+		}
+
+		parts = append(parts, fmt.Sprintf("tcp:%s:%s:%s:%d", routerName, routerConfig.Rule, routerConfig.RuleSyntax, routerConfig.Priority))
+	}
+
+	for routerName, routerConfig := range rtConf.Routers {
+		if routerConfig == nil || routerConfig.TLS == nil || !slices.Contains(routerConfig.EntryPoints, entryPointName) {
+			continue
+		}
+
+		parts = append(parts, fmt.Sprintf("http:%s:%s:%s:%d", routerName, routerConfig.Rule, routerConfig.RuleSyntax, routerConfig.Priority))
+	}
+
+	slices.Sort(parts)
+
+	return strings.Join(parts, "\n")
 }

@@ -30,7 +30,7 @@ func BuildTCPRouterConfiguration(ctx context.Context, configuration *dynamic.TCP
 	for routerName, router := range configuration.Routers {
 		loggerRouter := log.Ctx(ctx).With().Str(logs.RouterName, routerName).Logger()
 
-		if len(router.Rule) == 0 {
+		if len(router.Rule) == 0 && !router.Fallback {
 			delete(configuration.Routers, routerName)
 			loggerRouter.Error().Msg("Empty rule")
 			continue
@@ -88,7 +88,7 @@ func BuildRouterConfiguration(ctx context.Context, configuration *dynamic.HTTPCo
 	for routerName, router := range configuration.Routers {
 		loggerRouter := log.Ctx(ctx).With().Str(logs.RouterName, routerName).Logger()
 
-		if len(router.Rule) == 0 {
+		if len(router.Rule) == 0 && !router.Fallback {
 			writer := &bytes.Buffer{}
 			if err := defaultRuleTpl.Execute(writer, model); err != nil {
 				loggerRouter.Error().Err(err).Msg("Error while parsing default rule")

@@ -237,10 +237,29 @@ func (m *Manager) buildEntryPointHandler(ctx context.Context, entryPointName str
 	}
 
 	muxer.SetDefaultHandler(defaultHandler)
+	hasFallback := false
 
 	for routerName, routerConfig := range configs {
 		logger := log.Ctx(ctx).With().Str(logs.RouterName, routerName).Logger()
 		ctxRouter := logger.WithContext(provider.AddInContext(ctx, routerName))
+
+		if routerConfig.Fallback {
+			if hasFallback {
+				err = errors.New("HTTP fallback handler already configured")
+				routerConfig.AddError(err, true)
+				logger.Error().Err(err).Send()
+				continue
+			}
+
+			if err = m.addFallbackHTTPHandler(ctxRouter, entryPointName, routerName, routerConfig, muxer, config); err != nil {
+				routerConfig.AddError(err, true)
+				logger.Error().Err(err).Send()
+				continue
+			}
+
+			hasFallback = true
+			continue
+		}
 
 		if routerConfig.Priority == 0 {
 			routerConfig.Priority = httpmuxer.GetRulePriority(routerConfig.Rule)
@@ -291,6 +310,32 @@ func (m *Manager) buildEntryPointHandler(ctx context.Context, entryPointName str
 	})
 
 	return chain.Then(muxer)
+}
+
+func (m *Manager) addFallbackHTTPHandler(ctx context.Context, entryPointName, routerName string, routerConfig *runtime.RouterInfo, muxer *httpmuxer.Muxer, config dynamic.RouterObservabilityConfig) error {
+	if routerConfig.Rule != "" {
+		return errors.New("fallback HTTP router cannot define a rule")
+	}
+
+	handler, err := m.buildRouterHandler(ctx, entryPointName, routerName, routerConfig)
+	if err != nil {
+		return err
+	}
+
+	if routerConfig.Observability != nil {
+		config = *routerConfig.Observability
+	}
+
+	observabilityChain := m.observabilityMgr.BuildEPChain(ctx, entryPointName, strings.HasSuffix(routerConfig.Service, "@internal"), config)
+	handler, err = observabilityChain.Then(handler)
+	if err != nil {
+		return err
+	}
+
+	log.Ctx(ctx).Debug().Msg("Adding HTTP fallback route")
+	muxer.SetDefaultHandler(handler)
+
+	return nil
 }
 
 func (m *Manager) buildRouterHandler(ctx context.Context, entryPointName, routerName string, routerConfig *runtime.RouterInfo) (http.Handler, error) {

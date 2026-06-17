@@ -246,6 +246,51 @@ func Test_Routing(t *testing.T) {
 			},
 		},
 		{
+			desc:    "TCP fallback router catches unmatched plain TCP before HTTP",
+			routers: []applyRouter{routerTCPFallback, routerHTTP},
+			checks: []checkCase{
+				{
+					desc:        "TCP with client sending first bytes should be handled by TCP fallback service",
+					checkRouter: checkTCPClientFirst,
+				},
+				{
+					desc:          "HTTP request should fail, because handled by TCP fallback service",
+					checkRouter:   checkHTTP,
+					expectedError: "malformed HTTP response",
+				},
+			},
+		},
+		{
+			desc:    "HTTP fallback router lets HTTP handle non-TLS before TCP fallback",
+			routers: []applyRouter{routerTCPFallback, routerHTTPFallback},
+			checks: []checkCase{
+				{
+					desc:        "HTTP request should be handled by HTTP service",
+					checkRouter: checkHTTP,
+				},
+			},
+		},
+		{
+			desc:    "TCP TLS fallback router catches unmatched TLS before HTTPS catchAll",
+			routers: []applyRouter{routerTCPTLSFallbackPassthrough, routerHTTPSPathPrefix},
+			checks: []checkCase{
+				{
+					desc:        "TLS client hello should be forwarded raw to TCP fallback service",
+					checkRouter: checkRawTLSFallback,
+				},
+			},
+		},
+		{
+			desc:    "TCP TLS fallback router does not catch specific HTTPS router",
+			routers: []applyRouter{routerTCPTLSFallbackPassthrough, routerHTTPS},
+			checks: []checkCase{
+				{
+					desc:        "HTTPS TLS 1.2 request should be handled by specific HTTPS service",
+					checkRouter: checkHTTPSTLS12,
+				},
+			},
+		},
+		{
 			desc:    "Single TCP CatchAll router",
 			routers: []applyRouter{routerTCPCatchAll},
 			checks: []checkCase{
@@ -567,7 +612,7 @@ func Test_Routing(t *testing.T) {
 				router(dynConf)
 			}
 
-			router, err := manager.buildEntryPointHandler(t.Context(), dynConf.TCPRouters, dynConf.Routers, nil, nil)
+			router, err := manager.buildEntryPointHandler(t.Context(), "web", dynConf.TCPRouters, dynConf.Routers, nil, nil)
 			require.NoError(t, err)
 
 			if test.allowACMETLSPassthrough {
@@ -668,6 +713,50 @@ func Test_Routing(t *testing.T) {
 			<-stoppedHTTPS
 		})
 	}
+}
+
+func TestRouter_tlsFallbackCacheKey(t *testing.T) {
+	router, err := NewRouter(nil)
+	require.NoError(t, err)
+
+	hello := &clientHello{
+		serverName: "fallback.example.com",
+		protos:     []string{"h2"},
+	}
+
+	first := router.tlsFallbackKey(hello, &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 1234})
+	router.cacheTLSFallback(first)
+
+	assert.True(t, router.isTLSFallbackCached(first))
+
+	sameSNIWithDifferentRemoteIP := router.tlsFallbackKey(hello, &net.TCPAddr{IP: net.ParseIP("192.0.2.2"), Port: 1234})
+	assert.False(t, router.isTLSFallbackCached(sameSNIWithDifferentRemoteIP))
+
+	sameSNIWithDifferentALPN := router.tlsFallbackKey(&clientHello{
+		serverName: "fallback.example.com",
+		protos:     []string{"http/1.1"},
+	}, &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 1234})
+	assert.False(t, router.isTLSFallbackCached(sameSNIWithDifferentALPN))
+}
+
+func TestRouter_tlsFallbackCacheCanBeShared(t *testing.T) {
+	cache := NewTLSFallbackCache()
+
+	firstRouter, err := NewRouter(nil, cache)
+	require.NoError(t, err)
+
+	hello := &clientHello{
+		serverName: "fallback.example.com",
+		protos:     []string{"h2"},
+	}
+
+	key := firstRouter.tlsFallbackKey(hello, &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 1234})
+	firstRouter.cacheTLSFallback(key)
+
+	secondRouter, err := NewRouter(nil, cache)
+	require.NoError(t, err)
+
+	assert.True(t, secondRouter.isTLSFallbackCached(key))
 }
 
 func Test_Router_acmeTLSALPNHandlerTimeout(t *testing.T) {
@@ -1005,6 +1094,17 @@ func routerTCPCatchAll(conf *runtime.Configuration) {
 	}
 }
 
+// routerTCPFallback configures a non-TLS TCP fallback router.
+func routerTCPFallback(conf *runtime.Configuration) {
+	conf.TCPRouters["tcp-fallback"] = &runtime.TCPRouterInfo{
+		TCPRouter: &dynamic.TCPRouter{
+			EntryPoints: []string{"web"},
+			Service:     "tcp",
+			Fallback:    true,
+		},
+	}
+}
+
 // routerHTTP configures an HTTP - Host(`foo.bar`) router.
 func routerHTTP(conf *runtime.Configuration) {
 	conf.Routers["http"] = &runtime.RouterInfo{
@@ -1012,6 +1112,17 @@ func routerHTTP(conf *runtime.Configuration) {
 			EntryPoints: []string{"web"},
 			Service:     "http",
 			Rule:        "Host(`foo.bar`)",
+		},
+	}
+}
+
+// routerHTTPFallback configures an HTTP fallback router.
+func routerHTTPFallback(conf *runtime.Configuration) {
+	conf.Routers["http-fallback"] = &runtime.RouterInfo{
+		Router: &dynamic.Router{
+			EntryPoints: []string{"web"},
+			Service:     "http",
+			Fallback:    true,
 		},
 	}
 }
@@ -1039,6 +1150,20 @@ func routerTCPTLSCatchAllPassthrough(conf *runtime.Configuration) {
 			Rule:        "HostSNI(`*`)",
 			TLS: &dynamic.RouterTCPTLSConfig{
 				Options:     "tls12",
+				Passthrough: true,
+			},
+		},
+	}
+}
+
+// routerTCPTLSFallbackPassthrough configures a TCP TLS passthrough fallback router.
+func routerTCPTLSFallbackPassthrough(conf *runtime.Configuration) {
+	conf.TCPRouters["tcp-tls-fallback-passthrough"] = &runtime.TCPRouterInfo{
+		TCPRouter: &dynamic.TCPRouter{
+			EntryPoints: []string{"web"},
+			Service:     "tcp",
+			Fallback:    true,
+			TLS: &dynamic.RouterTCPTLSConfig{
 				Passthrough: true,
 			},
 		},
@@ -1265,6 +1390,60 @@ func checkTCPTLS10(addr string, timeout time.Duration) error {
 // It returns an error if it doesn't receive the expected response.
 func checkTCPTLS12(addr string, timeout time.Duration) error {
 	return checkTCPTLS(addr, timeout, tls.VersionTLS12)
+}
+
+// checkRawTLSFallback simulates a raw TLS client hello and expects the TCP fallback service response.
+func checkRawTLSFallback(addr string, timeout time.Duration) (err error) {
+	serverConn, clientConn := net.Pipe()
+	recordCh := make(chan []byte, 1)
+
+	go func() {
+		buf := make([]byte, 65536)
+		n, _ := serverConn.Read(buf)
+		_ = serverConn.Close()
+		recordCh <- buf[:n]
+	}()
+
+	go func() {
+		tlsConn := tls.Client(clientConn, &tls.Config{
+			ServerName:         "unknown.localhost",
+			InsecureSkipVerify: true, //nolint:gosec
+		})
+		_ = tlsConn.Handshake()
+		_ = clientConn.Close()
+	}()
+
+	record := <-recordCh
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		closeErr := conn.Close()
+		if closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+
+	if _, err = conn.Write(record); err != nil {
+		return err
+	}
+
+	if err = conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+
+	var buf bytes.Buffer
+	if _, err = io.Copy(&buf, conn); err != nil {
+		return err
+	}
+
+	if !strings.HasPrefix(buf.String(), "TCP-CLIENT-FIRST") {
+		return fmt.Errorf("unexpected response: %s", buf.String())
+	}
+
+	return nil
 }
 
 // checkHTTPS makes an HTTPS request and checks the given TLS.

@@ -10,6 +10,17 @@ A TCP router is in charge of connecting incoming TCP connections to the services
 !!! note "TCP vs HTTP Routing"
     If both HTTP routers and TCP routers listen to the same EntryPoint, the TCP routers will apply before the HTTP routers. If no matching route is found for the TCP routers, then the HTTP routers will take over.
 
+## Fallback Routers
+
+A TCP router with `fallback: true` is installed as the EntryPoint fallback instead of being evaluated as a regular rule-based router.
+Fallback routers are selected only after Traefik fails to match a more specific TCP or TLS route.
+
+For non-TLS connections, a fallback router without a `tls` section forwards the raw stream before Traefik hands the connection to HTTP routers.
+For TLS connections, a fallback router with `tls.passthrough: true` forwards the raw TLS stream after specific HTTPS and TCP-TLS SNI routes are checked, and before HTTPS catch-all routing or the HTTPS 404 handler can terminate TLS.
+
+Only one non-TLS fallback router and one TLS fallback router can be configured on the same EntryPoint.
+TLS fallback routers must enable `tls.passthrough`.
+
 ## Configuration Example
 
 ```yaml tab="Structured (YAML)"
@@ -32,6 +43,30 @@ tcp:
             sans:
               - "www.example.com"
       service: my-tcp-service
+```
+
+```yaml tab="Fallback (YAML)"
+tcp:
+  routers:
+    secondary-proxy-tls:
+      entryPoints:
+        - "websecure"
+      fallback: true
+      service: secondary-proxy
+      tls:
+        passthrough: true
+
+    secondary-proxy-plain:
+      entryPoints:
+        - "websecure"
+      fallback: true
+      service: secondary-proxy
+
+  services:
+    secondary-proxy:
+      loadBalancer:
+        servers:
+          - address: "secondary-proxy:443"
 ```
 
 ```toml tab="Structured (TOML)"
@@ -89,8 +124,9 @@ labels:
 | Field                                                                          | Description                                                                                                                                                                                                                                                                                                          | Default              | Required |
 |--------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------|----------|
 | <a id="opt-entryPoints" href="#opt-entryPoints" title="#opt-entryPoints">`entryPoints`</a> | The list of entry points to which the router is attached. If not specified, TCP routers are attached to all TCP entry points.                                                                                                                                                                                        | All TCP entry points | No       |
-| <a id="opt-rule" href="#opt-rule" title="#opt-rule">`rule`</a> | Rules are a set of matchers configured with values, that determine if a particular connection matches specific criteria. If the rule is verified, the router becomes active, calls middlewares, and then forwards the connection to the service. See [Rules & Priority](./rules-and-priority.md) for details.        |                      | Yes      |
+| <a id="opt-rule" href="#opt-rule" title="#opt-rule">`rule`</a> | Rules are a set of matchers configured with values, that determine if a particular connection matches specific criteria. If the rule is verified, the router becomes active, calls middlewares, and then forwards the connection to the service. See [Rules & Priority](./rules-and-priority.md) for details.        |                      | Yes, unless `fallback` is `true` |
 | <a id="opt-priority" href="#opt-priority" title="#opt-priority">`priority`</a> | To avoid rule overlap, routes are sorted, by default, in descending order using rules length. The priority is directly equal to the length of the rule, and so the longest length has the highest priority. A value of `0` for the priority is ignored. Negative values are supported. See [Rules & Priority](./rules-and-priority.md) for details. | Rule length          | No       |
+| <a id="opt-fallback" href="#opt-fallback" title="#opt-fallback">`fallback`</a> | Installs the router as an EntryPoint fallback instead of a rule-based route. Non-TLS fallback routers forward unmatched plain streams before HTTP routing. TLS fallback routers must use `tls.passthrough: true` and forward unmatched TLS streams before HTTPS catch-all routing or HTTPS 404 handling. | `false`              | No       |
 | <a id="opt-middlewares" href="#opt-middlewares" title="#opt-middlewares">`middlewares`</a> | The list of middlewares that are applied to the router. Middlewares are applied in the order they are declared. See [TCP Middlewares overview](../middlewares/overview.md) for available TCP middlewares.                                                                                                            |                      | No       |
 | <a id="opt-tls" href="#opt-tls" title="#opt-tls">`tls`</a> | TLS configuration for the router. When specified, the router will only handle TLS connections. See [TLS configuration](../tls.md) for detailed TLS options.                                                                                                                                                          |                      | No       |
 | <a id="opt-service" href="#opt-service" title="#opt-service">`service`</a> | The name of the service that will handle the matched connections. Services can be load balancer services or weighted round robin services. See [TCP Service](../service.md) for details.                                                                                                                             |                      | Yes      |
