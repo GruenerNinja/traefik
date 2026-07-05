@@ -19,6 +19,7 @@ For non-TLS connections, a fallback router without a `tls` section forwards the 
 For TLS connections, a fallback router with `tls.passthrough: true` forwards the raw TLS stream after specific HTTPS and TCP-TLS SNI routes are checked, and before HTTPS catch-all routing or the HTTPS 404 handler can terminate TLS.
 
 Only one non-TLS fallback router and one TLS fallback router can be configured on the same EntryPoint.
+Fallback routers must not define a `rule`.
 TLS fallback routers must enable `tls.passthrough`.
 
 ## Configuration Example

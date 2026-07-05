@@ -328,6 +328,133 @@ func TestRuntimeConfiguration(t *testing.T) {
 			},
 			expectedError: 1,
 		},
+		{
+			desc: "TCP fallback router",
+			tcpServiceConfig: map[string]*runtime.TCPServiceInfo{
+				"foo-service": {
+					TCPService: &dynamic.TCPService{
+						LoadBalancer: &dynamic.TCPServersLoadBalancer{
+							Servers: []dynamic.TCPServer{{Address: "127.0.0.1:80"}},
+						},
+					},
+				},
+			},
+			tcpRouterConfig: map[string]*runtime.TCPRouterInfo{
+				"fallback": {
+					TCPRouter: &dynamic.TCPRouter{
+						EntryPoints: []string{"web"},
+						Service:     "foo-service",
+						Fallback:    true,
+					},
+				},
+			},
+		},
+		{
+			desc: "TCP fallback router with rule",
+			tcpServiceConfig: map[string]*runtime.TCPServiceInfo{
+				"foo-service": {
+					TCPService: &dynamic.TCPService{
+						LoadBalancer: &dynamic.TCPServersLoadBalancer{
+							Servers: []dynamic.TCPServer{{Address: "127.0.0.1:80"}},
+						},
+					},
+				},
+			},
+			tcpRouterConfig: map[string]*runtime.TCPRouterInfo{
+				"fallback": {
+					TCPRouter: &dynamic.TCPRouter{
+						EntryPoints: []string{"web"},
+						Service:     "foo-service",
+						Rule:        "HostSNI(`fallback.local`)",
+						Fallback:    true,
+					},
+				},
+			},
+			expectedError: 1,
+		},
+		{
+			desc: "TCP fallback router with TLS but no passthrough",
+			tcpServiceConfig: map[string]*runtime.TCPServiceInfo{
+				"foo-service": {
+					TCPService: &dynamic.TCPService{
+						LoadBalancer: &dynamic.TCPServersLoadBalancer{
+							Servers: []dynamic.TCPServer{{Address: "127.0.0.1:80"}},
+						},
+					},
+				},
+			},
+			tcpRouterConfig: map[string]*runtime.TCPRouterInfo{
+				"fallback": {
+					TCPRouter: &dynamic.TCPRouter{
+						EntryPoints: []string{"web"},
+						Service:     "foo-service",
+						Fallback:    true,
+						TLS:         &dynamic.RouterTCPTLSConfig{},
+					},
+				},
+			},
+			expectedError: 1,
+		},
+		{
+			desc: "Duplicate TCP fallback routers",
+			tcpServiceConfig: map[string]*runtime.TCPServiceInfo{
+				"foo-service": {
+					TCPService: &dynamic.TCPService{
+						LoadBalancer: &dynamic.TCPServersLoadBalancer{
+							Servers: []dynamic.TCPServer{{Address: "127.0.0.1:80"}},
+						},
+					},
+				},
+			},
+			tcpRouterConfig: map[string]*runtime.TCPRouterInfo{
+				"fallback-a": {
+					TCPRouter: &dynamic.TCPRouter{
+						EntryPoints: []string{"web"},
+						Service:     "foo-service",
+						Fallback:    true,
+					},
+				},
+				"fallback-b": {
+					TCPRouter: &dynamic.TCPRouter{
+						EntryPoints: []string{"web"},
+						Service:     "foo-service",
+						Fallback:    true,
+					},
+				},
+			},
+			expectedError: 1,
+		},
+		{
+			desc: "Duplicate TLS fallback routers",
+			tcpServiceConfig: map[string]*runtime.TCPServiceInfo{
+				"foo-service": {
+					TCPService: &dynamic.TCPService{
+						LoadBalancer: &dynamic.TCPServersLoadBalancer{
+							Servers: []dynamic.TCPServer{{Address: "127.0.0.1:80"}},
+						},
+					},
+				},
+			},
+			tcpRouterConfig: map[string]*runtime.TCPRouterInfo{
+				"fallback-a": {
+					TCPRouter: &dynamic.TCPRouter{
+						EntryPoints: []string{"web"},
+						Service:     "foo-service",
+						Fallback:    true,
+						TLS:         &dynamic.RouterTCPTLSConfig{Passthrough: true},
+					},
+				},
+				"fallback-b": {
+					TCPRouter: &dynamic.TCPRouter{
+						EntryPoints: []string{"web"},
+						Service:     "foo-service",
+						Fallback:    true,
+						TLS:         &dynamic.RouterTCPTLSConfig{Passthrough: true},
+					},
+				},
+			},
+			expectedError: 1,
+		},
 	}
 
 	for _, test := range testCases {
