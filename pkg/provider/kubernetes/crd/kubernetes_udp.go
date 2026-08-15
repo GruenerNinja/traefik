@@ -11,6 +11,7 @@ import (
 	"github.com/traefik/traefik/v3/pkg/config/dynamic"
 	traefikv1alpha1 "github.com/traefik/traefik/v3/pkg/provider/kubernetes/crd/traefikio/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
 func (p *Provider) loadIngressRouteUDPConfiguration(ctx context.Context, client Client) *dynamic.UDPConfiguration {
@@ -36,10 +37,17 @@ func (p *Provider) loadIngressRouteUDPConfiguration(ctx context.Context, client 
 		}
 
 		for i, route := range ingressRouteUDP.Spec.Routes {
-			key := fmt.Sprintf("%s-%d", ingressName, i)
-			serviceName := makeID(ingressRouteUDP.Namespace, key)
+			routeIndex := strconv.Itoa(i)
 
-			for _, service := range route.Services {
+			routerName := makeKey(ingressRouteUDP.Namespace, ingressName, routeIndex)
+			serviceName := routerName
+
+			var wrrName string
+			if len(route.Services) > 1 {
+				wrrName = makeKey(ingressRouteUDP.Namespace, ingressName, routeIndex, roleWRR)
+			}
+
+			for si, service := range route.Services {
 				balancerServerUDP, err := p.createLoadBalancerServerUDP(client, ingressRouteUDP.Namespace, service)
 				if err != nil {
 					logger.Error().
@@ -53,11 +61,14 @@ func (p *Provider) loadIngressRouteUDPConfiguration(ctx context.Context, client 
 				// If there is only one service defined, we skip the creation of the load balancer of services,
 				// i.e. the service on top is directly a load balancer of servers.
 				if len(route.Services) == 1 {
+					serviceName = makeKey(ingressRouteUDP.Namespace, ingressName, routeIndex, roleLB)
 					conf.Services[serviceName] = balancerServerUDP
 					break
 				}
 
-				serviceKey := fmt.Sprintf("%s-%s-%s", serviceName, service.Name, &service.Port)
+				serviceName = wrrName
+
+				serviceKey := makeKey(ingressRouteUDP.Namespace, ingressName, routeIndex, roleWRR, strconv.Itoa(si), namespaceOrParentNamespace(service.Namespace, ingressRouteUDP.Namespace), service.Name, service.Port.String())
 				conf.Services[serviceKey] = balancerServerUDP
 
 				srv := dynamic.UDPWRRService{Name: serviceKey}
@@ -72,7 +83,7 @@ func (p *Provider) loadIngressRouteUDPConfiguration(ctx context.Context, client 
 				conf.Services[serviceName].Weighted.Services = append(conf.Services[serviceName].Weighted.Services, srv)
 			}
 
-			conf.Routers[serviceName] = &dynamic.UDPRouter{
+			conf.Routers[routerName] = &dynamic.UDPRouter{
 				EntryPoints: ingressRouteUDP.Spec.EntryPoints,
 				Service:     serviceName,
 			}
@@ -184,8 +195,8 @@ func (p *Provider) loadUDPServers(client Client, namespace string, svc traefikv1
 		for _, endpointSlice := range endpointSlices {
 			var port int32
 			for _, p := range endpointSlice.Ports {
-				if svcPort.Name == *p.Name {
-					port = *p.Port
+				if p.Name != nil && svcPort.Name == *p.Name {
+					port = ptr.Deref(p.Port, 0)
 					break
 				}
 			}
