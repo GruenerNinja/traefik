@@ -385,6 +385,13 @@ func (m *Manager) addTCPHandlers(ctx context.Context, configs map[string]*runtim
 func (m *Manager) addFallbackTCPHandler(ctx context.Context, routerConfig *runtime.TCPRouterInfo, router *Router) {
 	logger := log.Ctx(ctx)
 
+	if routerConfig.Rule != "" {
+		err := errors.New("fallback TCP router cannot define a rule")
+		routerConfig.AddError(err, true)
+		logger.Error().Err(err).Send()
+		return
+	}
+
 	if routerConfig.TLS != nil && !routerConfig.TLS.Passthrough {
 		err := errors.New("fallback TLS router must enable TLS passthrough")
 		routerConfig.AddError(err, true)

@@ -351,6 +351,81 @@ func TestRouterManager_Get(t *testing.T) {
 	}
 }
 
+func TestRouterManager_HTTPFallback(t *testing.T) {
+	rtConf := runtime.NewConfig(dynamic.Configuration{
+		HTTP: &dynamic.HTTPConfiguration{
+			Services: map[string]*dynamic.Service{
+				"primary-service": {
+					LoadBalancer: &dynamic.ServersLoadBalancer{
+						Servers: []dynamic.Server{{URL: "http://primary.local"}},
+					},
+				},
+				"fallback-service": {
+					LoadBalancer: &dynamic.ServersLoadBalancer{
+						Servers: []dynamic.Server{{URL: "http://fallback.local"}},
+					},
+				},
+			},
+			Routers: map[string]*dynamic.Router{
+				"primary": {
+					EntryPoints: []string{"web"},
+					Rule:        "Host(`primary.local`)",
+					Service:     "primary-service",
+				},
+				"fallback": {
+					EntryPoints: []string{"web"},
+					Service:     "fallback-service",
+					Fallback:    true,
+				},
+			},
+		},
+	})
+
+	transportManager := service.NewTransportManager(nil)
+	transportManager.Update(map[string]*dynamic.ServersTransport{"default@internal": {}})
+
+	serviceManager := service.NewManager(rtConf.Services, nil, nil, transportManager, labellingProxyBuilder{})
+	middlewaresBuilder := middleware.NewBuilder(rtConf.Middlewares, serviceManager, nil)
+	tlsManager := traefiktls.NewManager(nil)
+
+	parser, err := httpmuxer.NewSyntaxParser()
+	require.NoError(t, err)
+
+	routerManager := NewManager(rtConf, serviceManager, middlewaresBuilder, nil, tlsManager, parser, []string{})
+	handlers := routerManager.BuildHandlers(t.Context(), []string{"web"}, false)
+	require.NotNil(t, handlers["web"])
+
+	testCases := []struct {
+		desc     string
+		host     string
+		expected string
+	}{
+		{
+			desc:     "regular router wins before fallback",
+			host:     "primary.local",
+			expected: "primary.local",
+		},
+		{
+			desc:     "fallback handles unmatched request",
+			host:     "unknown.local",
+			expected: "fallback.local",
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.desc, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			req := testhelpers.MustNewRequest(http.MethodGet, "http://"+test.host+"/", nil)
+
+			reqHost := requestdecorator.New(nil)
+			reqHost.ServeHTTP(recorder, req, handlers["web"].ServeHTTP)
+
+			assert.Equal(t, http.StatusOK, recorder.Code)
+			assert.Equal(t, test.expected, recorder.Header().Get("X-From"))
+		})
+	}
+}
+
 func TestRuntimeConfiguration(t *testing.T) {
 	testCases := []struct {
 		desc             string
@@ -719,6 +794,65 @@ func TestRuntimeConfiguration(t *testing.T) {
 			},
 			tlsOptions: map[string]traefiktls.Options{
 				"foo": {MinVersion: "VersionTLS12"},
+			},
+			expectedError: 1,
+		},
+		{
+			desc: "Fallback router",
+			serviceConfig: map[string]*dynamic.Service{
+				"fallback-service": {
+					LoadBalancer: &dynamic.ServersLoadBalancer{
+						Servers: []dynamic.Server{{URL: "http://127.0.0.1"}},
+					},
+				},
+			},
+			routerConfig: map[string]*dynamic.Router{
+				"fallback": {
+					EntryPoints: []string{"web"},
+					Service:     "fallback-service",
+					Fallback:    true,
+				},
+			},
+		},
+		{
+			desc: "Fallback router with rule",
+			serviceConfig: map[string]*dynamic.Service{
+				"fallback-service": {
+					LoadBalancer: &dynamic.ServersLoadBalancer{
+						Servers: []dynamic.Server{{URL: "http://127.0.0.1"}},
+					},
+				},
+			},
+			routerConfig: map[string]*dynamic.Router{
+				"fallback": {
+					EntryPoints: []string{"web"},
+					Rule:        "Host(`fallback.local`)",
+					Service:     "fallback-service",
+					Fallback:    true,
+				},
+			},
+			expectedError: 1,
+		},
+		{
+			desc: "Duplicate fallback routers",
+			serviceConfig: map[string]*dynamic.Service{
+				"fallback-service": {
+					LoadBalancer: &dynamic.ServersLoadBalancer{
+						Servers: []dynamic.Server{{URL: "http://127.0.0.1"}},
+					},
+				},
+			},
+			routerConfig: map[string]*dynamic.Router{
+				"fallback-a": {
+					EntryPoints: []string{"web"},
+					Service:     "fallback-service",
+					Fallback:    true,
+				},
+				"fallback-b": {
+					EntryPoints: []string{"web"},
+					Service:     "fallback-service",
+					Fallback:    true,
+				},
 			},
 			expectedError: 1,
 		},
