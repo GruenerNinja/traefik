@@ -13,11 +13,81 @@ import (
 	"github.com/traefik/traefik/v3/pkg/config/runtime"
 	"github.com/traefik/traefik/v3/pkg/config/static"
 	"github.com/traefik/traefik/v3/pkg/server/middleware"
+	tcprouter "github.com/traefik/traefik/v3/pkg/server/router/tcp"
 	"github.com/traefik/traefik/v3/pkg/server/service"
 	"github.com/traefik/traefik/v3/pkg/tcp"
 	th "github.com/traefik/traefik/v3/pkg/testhelpers"
 	"github.com/traefik/traefik/v3/pkg/tls"
 )
+
+func TestTLSFallbackCachesReload(t *testing.T) {
+	testCases := []struct {
+		desc   string
+		change func(*runtime.Configuration)
+		reset  bool
+	}{
+		{
+			desc: "HTTP route changes",
+			change: func(conf *runtime.Configuration) {
+				conf.Routers["https"].Rule = "Host(`new.example.com`)"
+			},
+			reset: true,
+		},
+		{
+			desc: "TCP TLS route changes",
+			change: func(conf *runtime.Configuration) {
+				conf.TCPRouters["tls"].Rule = "HostSNI(`new.example.com`)"
+			},
+			reset: true,
+		},
+		{
+			desc: "TLS route removed",
+			change: func(conf *runtime.Configuration) {
+				delete(conf.TCPRouters, "tls")
+			},
+			reset: true,
+		},
+		{
+			desc: "service changes preserve routing decisions",
+			change: func(conf *runtime.Configuration) {
+				conf.Routers["https"].Service = "new-service"
+			},
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.desc, func(t *testing.T) {
+			t.Parallel()
+
+			factory := &RouterFactory{
+				entryPointsTCP:             []string{"websecure", "other"},
+				tlsFallbackCaches:          make(map[string]*tcprouter.TLSFallbackCache),
+				tlsFallbackRouteSignatures: make(map[string]string),
+			}
+			conf := runtime.NewConfig(dynamic.Configuration{
+				HTTP: &dynamic.HTTPConfiguration{Routers: map[string]*dynamic.Router{
+					"https": {EntryPoints: []string{"websecure"}, Rule: "Host(`example.com`)", TLS: &dynamic.RouterTLSConfig{}},
+				}},
+				TCP: &dynamic.TCPConfiguration{Routers: map[string]*dynamic.TCPRouter{
+					"tls": {EntryPoints: []string{"websecure"}, Rule: "HostSNI(`example.com`)", TLS: &dynamic.RouterTCPTLSConfig{Passthrough: true}},
+				}},
+			})
+
+			before := factory.getTLSFallbackCaches(conf)
+			unchanged := factory.getTLSFallbackCaches(conf)
+			assert.Same(t, before["websecure"], unchanged["websecure"])
+
+			test.change(conf)
+			after := factory.getTLSFallbackCaches(conf)
+			if test.reset {
+				assert.NotSame(t, before["websecure"], after["websecure"])
+			} else {
+				assert.Same(t, before["websecure"], after["websecure"])
+			}
+			assert.Same(t, before["other"], after["other"])
+		})
+	}
+}
 
 func TestReuseService(t *testing.T) {
 	testServer := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {

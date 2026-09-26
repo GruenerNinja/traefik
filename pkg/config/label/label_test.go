@@ -1480,6 +1480,7 @@ func TestEncodeConfiguration(t *testing.T) {
 		"traefik.HTTP.Routers.Router0.EntryPoints":              "foobar, fiibar",
 		"traefik.HTTP.Routers.Router0.Middlewares":              "foobar, fiibar",
 		"traefik.HTTP.Routers.Router0.Priority":                 "42",
+		"traefik.HTTP.Routers.Router0.Fallback":                 "false",
 		"traefik.HTTP.Routers.Router0.Rule":                     "foobar",
 		"traefik.HTTP.Routers.Router0.Service":                  "foobar",
 		"traefik.HTTP.Routers.Router0.TLS":                      "true",
@@ -1489,6 +1490,7 @@ func TestEncodeConfiguration(t *testing.T) {
 		"traefik.HTTP.Routers.Router1.EntryPoints":              "foobar, fiibar",
 		"traefik.HTTP.Routers.Router1.Middlewares":              "foobar, fiibar",
 		"traefik.HTTP.Routers.Router1.Priority":                 "42",
+		"traefik.HTTP.Routers.Router1.Fallback":                 "false",
 		"traefik.HTTP.Routers.Router1.Rule":                     "foobar",
 		"traefik.HTTP.Routers.Router1.Service":                  "foobar",
 		"traefik.HTTP.Routers.Router1.Observability.AccessLogs": "true",
@@ -1544,12 +1546,14 @@ func TestEncodeConfiguration(t *testing.T) {
 		"traefik.TCP.Middlewares.Middleware2.InFlightConn.Amount":     "42",
 		"traefik.TCP.Routers.Router0.Rule":                            "foobar",
 		"traefik.TCP.Routers.Router0.Priority":                        "42",
+		"traefik.TCP.Routers.Router0.Fallback":                        "false",
 		"traefik.TCP.Routers.Router0.EntryPoints":                     "foobar, fiibar",
 		"traefik.TCP.Routers.Router0.Service":                         "foobar",
 		"traefik.TCP.Routers.Router0.TLS.Passthrough":                 "false",
 		"traefik.TCP.Routers.Router0.TLS.Options":                     "foo",
 		"traefik.TCP.Routers.Router1.Rule":                            "foobar",
 		"traefik.TCP.Routers.Router1.Priority":                        "42",
+		"traefik.TCP.Routers.Router1.Fallback":                        "false",
 		"traefik.TCP.Routers.Router1.EntryPoints":                     "foobar, fiibar",
 		"traefik.TCP.Routers.Router1.Service":                         "foobar",
 		"traefik.TCP.Routers.Router1.TLS.Passthrough":                 "false",
@@ -1587,4 +1591,28 @@ func TestEncodeConfiguration(t *testing.T) {
 		}
 	}
 	assert.Equal(t, expected, labels)
+}
+
+func TestFallbackConfiguration(t *testing.T) {
+	conf, err := DecodeConfiguration(map[string]string{
+		"traefik.http.routers.http-fallback.fallback":      "true",
+		"traefik.http.routers.http-fallback.service":       "http-service",
+		"traefik.tcp.routers.tls-fallback.fallback":        "true",
+		"traefik.tcp.routers.tls-fallback.service":         "tls-service",
+		"traefik.tcp.routers.tls-fallback.tls.passthrough": "true",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, conf.HTTP.Routers["http-fallback"])
+	require.NotNil(t, conf.TCP.Routers["tls-fallback"])
+	assert.True(t, conf.HTTP.Routers["http-fallback"].Fallback)
+	assert.Empty(t, conf.HTTP.Routers["http-fallback"].Rule)
+	assert.True(t, conf.TCP.Routers["tls-fallback"].Fallback)
+	assert.Empty(t, conf.TCP.Routers["tls-fallback"].Rule)
+	require.NotNil(t, conf.TCP.Routers["tls-fallback"].TLS)
+	assert.True(t, conf.TCP.Routers["tls-fallback"].TLS.Passthrough)
+
+	labels, err := EncodeConfiguration(conf)
+	require.NoError(t, err)
+	assert.Equal(t, "true", labels["traefik.HTTP.Routers.http-fallback.Fallback"])
+	assert.Equal(t, "true", labels["traefik.TCP.Routers.tls-fallback.Fallback"])
 }

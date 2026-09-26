@@ -22,6 +22,9 @@ Only one non-TLS fallback router and one TLS fallback router can be configured o
 Fallback routers must not define a `rule`.
 TLS fallback routers must enable `tls.passthrough`.
 
+TLS fallback decisions are cached per EntryPoint with bounded memory use.
+Changes to specific HTTP or TCP TLS routes invalidate these decisions, so newly configured routes can take precedence immediately after a configuration reload.
+
 ## Configuration Example
 
 ```yaml tab="Structured (YAML)"

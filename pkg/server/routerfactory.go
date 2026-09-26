@@ -166,7 +166,9 @@ func (f *RouterFactory) getTLSFallbackCaches(rtConf *runtime.Configuration) map[
 
 		signature := tlsFallbackRouteSignature(rtConf, entryPointName)
 		if previousSignature, ok := f.tlsFallbackRouteSignatures[entryPointName]; ok && previousSignature != signature {
-			cache.Reset()
+			// In-flight connections on the previous router must not repopulate the new cache.
+			cache = tcprouter.NewTLSFallbackCache()
+			f.tlsFallbackCaches[entryPointName] = cache
 		}
 		f.tlsFallbackRouteSignatures[entryPointName] = signature
 

@@ -736,6 +736,28 @@ func TestRouter_tlsFallbackCacheKey(t *testing.T) {
 	assert.False(t, router.isTLSFallbackCached(sameSNIWithDifferentALPN))
 }
 
+func TestRouter_tlsFallbackCacheBounded(t *testing.T) {
+	router, err := NewRouter(nil)
+	require.NoError(t, err)
+
+	for i := range maxTLSFallbackCacheEntries {
+		router.cacheTLSFallback(fmt.Sprintf("host-%d.example.com", i))
+	}
+
+	assert.Len(t, router.tlsFallbackCache.entries, maxTLSFallbackCacheEntries)
+	router.cacheTLSFallback("host-0.example.com")
+	assert.Len(t, router.tlsFallbackCache.entries, maxTLSFallbackCacheEntries)
+	assert.True(t, router.isTLSFallbackCached("host-1.example.com"))
+
+	router.cacheTLSFallback("new.example.com")
+	assert.LessOrEqual(t, len(router.tlsFallbackCache.entries), maxTLSFallbackCacheEntries)
+	assert.True(t, router.isTLSFallbackCached("new.example.com"))
+
+	oversizedKey := strings.Repeat("x", maxTLSFallbackCacheKeySize+1)
+	router.cacheTLSFallback(oversizedKey)
+	assert.False(t, router.isTLSFallbackCached(oversizedKey))
+}
+
 func TestRouter_tlsFallbackCacheCanBeShared(t *testing.T) {
 	cache := NewTLSFallbackCache()
 

@@ -24,6 +24,11 @@ import (
 // errClientHelloRead is used as a sentinel error to break the TLS handshake once we have read the ClientHello.
 var errClientHelloRead = errors.New("client hello successfully read")
 
+const (
+	maxTLSFallbackCacheEntries = 4096
+	maxTLSFallbackCacheKeySize = 1024
+)
+
 type tlsConfigWithOptionsName struct {
 	cfg         *tls.Config
 	optionsName string
@@ -351,42 +356,6 @@ func (r *Router) SetTLSFallbackForwarder(handler tcp.Handler) error {
 	return nil
 }
 
-func (r *Router) tlsFallbackKey(hello *clientHello, remoteAddr net.Addr) string {
-	host, _, err := net.SplitHostPort(remoteAddr.String())
-	if err != nil {
-		host = remoteAddr.String()
-	}
-
-	return hello.serverName + "\x00" + host + "\x00" + strings.Join(hello.protos, "\x00")
-}
-
-func (r *Router) isTLSFallbackCached(key string) bool {
-	if r.tlsFallbackCache == nil {
-		return false
-	}
-
-	r.tlsFallbackCache.mu.RLock()
-	defer r.tlsFallbackCache.mu.RUnlock()
-
-	_, ok := r.tlsFallbackCache.entries[key]
-	return ok
-}
-
-func (r *Router) cacheTLSFallback(key string) {
-	if r.tlsFallbackCache == nil {
-		return
-	}
-
-	r.tlsFallbackCache.mu.Lock()
-	defer r.tlsFallbackCache.mu.Unlock()
-
-	if r.tlsFallbackCache.entries == nil {
-		r.tlsFallbackCache.entries = make(map[string]struct{})
-	}
-
-	r.tlsFallbackCache.entries[key] = struct{}{}
-}
-
 // SetHTTPSForwarder sets the tcp handler that will forward the TLS connections to an HTTP handler.
 // It also sets up each TLS handler (with its TLS config) for each Host(SNI) rule we previously kept track of.
 // It sets up a special handler that closes the connection if a TLS config is nil.
@@ -436,6 +405,51 @@ func (r *Router) SetHTTPSHandler(handler http.Handler, config *tls.Config) {
 
 func (r *Router) EnableACMETLSPassthrough() {
 	r.acmeTLSPassthrough = true
+}
+
+func (r *Router) tlsFallbackKey(hello *clientHello, remoteAddr net.Addr) string {
+	host, _, err := net.SplitHostPort(remoteAddr.String())
+	if err != nil {
+		host = remoteAddr.String()
+	}
+
+	return hello.serverName + "\x00" + host + "\x00" + strings.Join(hello.protos, "\x00")
+}
+
+func (r *Router) isTLSFallbackCached(key string) bool {
+	if r.tlsFallbackCache == nil {
+		return false
+	}
+
+	r.tlsFallbackCache.mu.RLock()
+	defer r.tlsFallbackCache.mu.RUnlock()
+
+	_, ok := r.tlsFallbackCache.entries[key]
+	return ok
+}
+
+func (r *Router) cacheTLSFallback(key string) {
+	if r.tlsFallbackCache == nil || len(key) > maxTLSFallbackCacheKeySize {
+		return
+	}
+
+	r.tlsFallbackCache.mu.Lock()
+	defer r.tlsFallbackCache.mu.Unlock()
+
+	if r.tlsFallbackCache.entries == nil {
+		r.tlsFallbackCache.entries = make(map[string]struct{})
+	}
+
+	if _, ok := r.tlsFallbackCache.entries[key]; ok {
+		return
+	}
+
+	// Client-controlled SNI and ALPN values must not grow the cache without a bound.
+	if len(r.tlsFallbackCache.entries) >= maxTLSFallbackCacheEntries {
+		clear(r.tlsFallbackCache.entries)
+	}
+
+	r.tlsFallbackCache.entries[key] = struct{}{}
 }
 
 // acmeTLSALPNHandler returns a special handler to solve ACME-TLS/1 challenges.
