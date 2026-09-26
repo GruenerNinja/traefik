@@ -543,6 +543,20 @@ func (p *Provider) loadConfigurationFromCRD(ctx context.Context, client Client) 
 					logger.Error().Err(err).Msg("Error while reading PingTimeout")
 				}
 			}
+
+			if serversTransport.Spec.ForwardingTimeouts.ReadTimeout != nil {
+				err := forwardingTimeout.ReadTimeout.Set(serversTransport.Spec.ForwardingTimeouts.ReadTimeout.String())
+				if err != nil {
+					logger.Error().Err(err).Msg("Error while reading ReadTimeout")
+				}
+			}
+
+			if serversTransport.Spec.ForwardingTimeouts.WriteTimeout != nil {
+				err := forwardingTimeout.WriteTimeout.Set(serversTransport.Spec.ForwardingTimeouts.WriteTimeout.String())
+				if err != nil {
+					logger.Error().Err(err).Msg("Error while reading WriteTimeout")
+				}
+			}
 		}
 
 		id := p.nameBuilder.makeID(serversTransport.Namespace, serversTransport.Name)
@@ -1343,7 +1357,7 @@ func (p *Provider) buildTLSOptions(ctx context.Context, client Client) map[strin
 		// When a namespace is explicitly configured, the default TLS options can only be defined in this namespace.
 		if tlsOptionsCRD.Name == tls.DefaultTLSConfigName &&
 			p.DefaultTLSResourcesNamespace != "" && tlsOptionsCRD.Namespace != p.DefaultTLSResourcesNamespace {
-			logger.Error().Msgf("Ignoring default TLS options: they can only be defined in the %q namespace", p.DefaultTLSResourcesNamespace)
+			logger.Warn().Msgf("Ignoring default TLS options: they can only be defined in the %q namespace", p.DefaultTLSResourcesNamespace)
 			continue
 		}
 
@@ -1427,7 +1441,7 @@ func (p *Provider) buildTLSStores(ctx context.Context, client Client) (map[strin
 		// When a namespace is explicitly configured, the default TLS store can only be defined in this namespace.
 		if t.Name == tls.DefaultTLSStoreName &&
 			p.DefaultTLSResourcesNamespace != "" && t.Namespace != p.DefaultTLSResourcesNamespace {
-			logger.Error().Msgf("Ignoring default TLS store: it can only be defined in the %q namespace", p.DefaultTLSResourcesNamespace)
+			logger.Warn().Msgf("Ignoring default TLS store: it can only be defined in the %q namespace", p.DefaultTLSResourcesNamespace)
 			continue
 		}
 
